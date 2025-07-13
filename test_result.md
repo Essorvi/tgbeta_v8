@@ -41,6 +41,18 @@
 ##         -agent: "main"  # or "testing" or "user"
 ##         -comment: "Detailed comment about status"
 ##
+  - task: "Добавить уведомления о пополнениях"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Добавлена полная система уведомлений о пополнениях: 1) Обработка pre_checkout_query и successful_payment для Telegram Stars; 2) Webhook endpoint для CryptoBot (/api/cryptobot/webhook); 3) Автоматическое зачисление средств на баланс; 4) Отправка уведомлений пользователю с подробностями платежа; 5) Запись платежей в базу данных; 6) Обновлена функция create_cryptobot_invoice для включения user_id в описание."
+
 ## metadata:
 ##   created_by: "main_agent"
 ##   version: "1.0"
