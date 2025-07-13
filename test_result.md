@@ -109,6 +109,21 @@
   test_all: false
   test_priority: "high_first"
 
+## backend:
+  - task: "Доделать функционал 'своя сумма' в разделах пополнения"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ COMPREHENSIVE TESTING COMPLETED: All custom amount functionality working perfectly. Tested all 4 scenarios from review request: 1) Telegram Stars custom amount flow (Баланс→⭐Звезды→💰Своя сумма) - WORKING, 2) Crypto custom amount flow for all currencies (BTC, ETH, USDT, LTC) - WORKING, 3) Amount validation (min 100₽, multiple of 50₽, max 50000₽) - WORKING, 4) User state management (waiting_custom_amount_stars, waiting_custom_amount_crypto) - WORKING. Critical bug fix confirmed: handle_telegram_update now correctly checks user_state for custom amount input processing. All callback buttons work correctly, user states are set and processed properly, validation works as expected, and invoice creation for Telegram Stars is successful. Total tests: 61 (39 detailed + 22 scenario-specific), Success rate: 100%. The исправление действительно работает!"
+
 ## agent_communication:
     - agent: "main"
       message: "Исправлен критический баг в функции handle_telegram_update: добавлена проверка состояния пользователя для обработки пользовательского ввода при выборе 'своя сумма'. Теперь бот корректно обрабатывает ввод произвольной суммы для пополнения как через Telegram Stars, так и через криптовалютные платежи. Функционал готов к тестированию."
+    - agent: "testing"
+      message: "🎉 ТЕСТИРОВАНИЕ ЗАВЕРШЕНО УСПЕШНО! Проведено комплексное тестирование функционала 'своя сумма' согласно техническому заданию. Все 4 приоритетных сценария протестированы и работают корректно: ✅ Telegram Stars custom amount (полный flow от меню до создания invoice), ✅ Crypto payments custom amount для всех валют (BTC/ETH/USDT/LTC), ✅ Валидация пользовательского ввода (все граничные случаи), ✅ User state management (корректная установка и обработка состояний). Критическое исправление в handle_telegram_update подтверждено - бот теперь правильно обрабатывает пользовательский ввод через проверку user_state. Функционал полностью рабочий, готов к продакшену."
