@@ -1297,8 +1297,90 @@ async def handle_custom_crypto_amount_input(chat_id: int, user: User, text: str,
     
     await handle_crypto_payment_amount(chat_id, user, crypto_type, str(amount))
 
+
+async def handle_pre_checkout_query(pre_checkout_query: Dict[str, Any]):
+    """Handle pre-checkout query from Telegram Stars payments"""
+    try:
+        query_id = pre_checkout_query.get('id')
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerPreCheckoutQuery"
+        
+        # Always approve the payment at this stage
+        payload = {
+            "pre_checkout_query_id": query_id,
+            "ok": True
+        }
+        
+        response = requests.post(url, json=payload)
+        if response.status_code != 200:
+            logging.error(f"Failed to answer pre-checkout query: {response.text}")
+            
+    except Exception as e:
+        logging.error(f"Error handling pre-checkout query: {e}")
+
+async def handle_successful_payment(message: Dict[str, Any]):
+    """Handle successful payment notification"""
+    try:
+        payment_info = message.get('successful_payment', {})
+        chat_id = message.get('chat', {}).get('id')
+        
+        if not payment_info or not chat_id:
+            return
+            
+        # Extract payment details
+        total_amount = float(payment_info.get('total_amount', 0)) / 100  # Convert from kopeks to rubles
+        payload = payment_info.get('invoice_payload', '')
+        
+        # Parse payload (format: "stars_payment_USER_ID_AMOUNT")
+        parts = payload.split('_')
+        if len(parts) >= 4 and parts[0] == 'stars' and parts[1] == 'payment':
+            user_id = int(parts[2])
+            amount = float(parts[3])
+            
+            # Create payment record
+            payment = Payment(
+                user_id=user_id,
+                amount=amount,
+                payment_type="stars",
+                payment_id=payment_info.get('telegram_payment_charge_id'),
+                status="completed"
+            )
+            
+            # Save payment to database
+            await db.payments.insert_one(payment.dict())
+            
+            # Update user balance
+            await db.users.update_one(
+                {"telegram_id": user_id},
+                {"$inc": {"balance": amount}}
+            )
+            
+            # Send confirmation message
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            message_text = (
+                f"✅ *Оплата успешно проведена!*\n\n"
+                f"💰 Сумма: {amount} ₽\n"
+                f"💫 Баланс пополнен\n\n"
+                f"🔍 Теперь вы можете пользоваться поиском!"
+            )
+            
+            payload = {
+                "chat_id": chat_id,
+                "text": message_text,
+                "parse_mode": "Markdown"
+            }
+            
+            requests.post(url, json=payload)
+            
+    except Exception as e:
+        logging.error(f"Error handling successful payment: {e}")
 async def handle_telegram_update(update_data: Dict[str, Any]):
     """Process incoming Telegram update"""
+    # Handle pre_checkout_query for Telegram Stars payments
+    pre_checkout_query = update_data.get('pre_checkout_query')
+    if pre_checkout_query:
+        await handle_pre_checkout_query(pre_checkout_query)
+        return
+    
     callback_query = update_data.get('callback_query')
     if callback_query:
         await handle_callback_query(callback_query)
@@ -1306,6 +1388,11 @@ async def handle_telegram_update(update_data: Dict[str, Any]):
     
     message = update_data.get('message')
     if not message:
+        return
+    
+    # Handle successful payment notifications
+    if message.get('successful_payment'):
+        await handle_successful_payment(message)
         return
 
     chat_id = message.get('chat', {}).get('id')
@@ -1530,6 +1617,103 @@ async def create_cryptobot_invoice(amount: float, currency: str = "RUB") -> Dict
     except Exception as e:
         logging.error(f"CryptoBot API error: {e}")
         return {"ok": False, "error": {"message": str(e)}}
+
+async def handle_pre_checkout_query(pre_checkout_query: Dict[str, Any]):
+    """Handle pre-checkout query for Telegram Stars payments"""
+    query_id = pre_checkout_query.get('id')
+    user_id = pre_checkout_query.get('from', {}).get('id')
+    invoice_payload = pre_checkout_query.get('invoice_payload', '')
+    
+    try:
+        # Always approve the pre-checkout query for valid Stars payments
+        if invoice_payload.startswith('stars_payment_'):
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerPreCheckoutQuery"
+            data = {
+                "pre_checkout_query_id": query_id,
+                "ok": True
+            }
+            requests.post(url, json=data, timeout=10)
+            logging.info(f"Pre-checkout approved for user {user_id}")
+        else:
+            # Reject invalid payments
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerPreCheckoutQuery"
+            data = {
+                "pre_checkout_query_id": query_id,
+                "ok": False,
+                "error_message": "Неверный платеж"
+            }
+            requests.post(url, json=data, timeout=10)
+            logging.warning(f"Pre-checkout rejected for user {user_id}: invalid payload")
+    except Exception as e:
+        logging.error(f"Error handling pre-checkout query: {e}")
+
+async def handle_successful_payment(message: Dict[str, Any]):
+    """Handle successful payment notification"""
+    payment_info = message.get('successful_payment', {})
+    user_id = message.get('from', {}).get('id')
+    chat_id = message.get('chat', {}).get('id')
+    
+    # Extract payment details
+    total_amount = payment_info.get('total_amount', 0)  # In stars
+    currency = payment_info.get('currency', 'XTR')
+    invoice_payload = payment_info.get('invoice_payload', '')
+    
+    try:
+        # Process Stars payment
+        if currency == 'XTR' and invoice_payload.startswith('stars_payment_'):
+            # Extract amount from payload: stars_payment_{user_id}_{amount}
+            payload_parts = invoice_payload.split('_')
+            if len(payload_parts) >= 3:
+                ruble_amount = float(payload_parts[2])
+            else:
+                ruble_amount = total_amount * 2  # 1 star = 2 rubles
+            
+            # Update user balance
+            result = await db.users.update_one(
+                {"telegram_id": user_id},
+                {"$inc": {"balance": ruble_amount}}
+            )
+            
+            if result.modified_count > 0:
+                # Save payment record
+                payment = Payment(
+                    user_id=user_id,
+                    amount=ruble_amount,
+                    payment_type="stars",
+                    payment_id=payment_info.get('telegram_payment_charge_id'),
+                    status="completed"
+                )
+                await db.payments.insert_one(payment.dict())
+                
+                # Send notification to user
+                notification_text = f"🎉 *ПОПОЛНЕНИЕ УСПЕШНО!*\n\n"
+                notification_text += f"⭐ *Способ:* Telegram Stars\n"
+                notification_text += f"💰 *Сумма:* {ruble_amount}₽\n"
+                notification_text += f"⭐ *Звезд потрачено:* {total_amount}\n\n"
+                notification_text += f"✅ *Средства зачислены на баланс*\n"
+                notification_text += f"🔍 *Теперь вы можете пользоваться сервисом!*"
+                
+                await send_telegram_message(
+                    chat_id,
+                    notification_text,
+                    reply_markup=create_main_menu()
+                )
+                
+                logging.info(f"Stars payment processed: {ruble_amount}₽ for user {user_id}")
+            else:
+                logging.error(f"Failed to update balance for user {user_id}")
+        else:
+            logging.warning(f"Unknown payment type: currency={currency}, payload={invoice_payload}")
+            
+    except Exception as e:
+        logging.error(f"Error processing successful payment: {e}")
+        
+        # Send error notification to user
+        await send_telegram_message(
+            chat_id,
+            "❌ *Ошибка обработки платежа*\n\nОбратитесь в поддержку @Sigicara",
+            reply_markup=create_back_keyboard()
+        )
 
 async def process_referral(referred_user_id: int, referral_code: str) -> bool:
     """Process referral"""
