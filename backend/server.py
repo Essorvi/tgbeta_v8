@@ -455,6 +455,84 @@ async def telegram_webhook(secret: str, request: Request):
         logging.error(f"Webhook processing failed: {e}")
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
 
+@api_router.post("/cryptobot/webhook")
+async def cryptobot_webhook(request: Request):
+    """Handle CryptoBot webhook for payment notifications"""
+    try:
+        webhook_data = await request.json()
+        await handle_cryptobot_payment(webhook_data)
+        return {"status": "ok"}
+    except Exception as e:
+        logging.error(f"CryptoBot webhook processing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"CryptoBot webhook processing failed: {str(e)}")
+
+async def handle_cryptobot_payment(webhook_data: Dict[str, Any]):
+    """Handle CryptoBot payment notification"""
+    try:
+        # CryptoBot webhook structure
+        update_type = webhook_data.get('update_type')
+        payload = webhook_data.get('payload', {})
+        
+        if update_type == 'invoice_paid':
+            invoice_id = payload.get('invoice_id')
+            status = payload.get('status')
+            amount = float(payload.get('amount', 0))
+            currency_type = payload.get('currency_type')
+            fiat = payload.get('fiat', 'RUB')
+            
+            # Extract user_id from invoice description or metadata
+            description = payload.get('description', '')
+            
+            # Parse user_id from description like "Пополнение баланса УЗРИ для пользователя 123456789"
+            import re
+            user_match = re.search(r'для пользователя (\d+)', description)
+            if not user_match:
+                logging.error(f"Cannot extract user_id from CryptoBot payment: {description}")
+                return
+                
+            user_id = int(user_match.group(1))
+            
+            if status == 'paid':
+                # Update user balance
+                result = await db.users.update_one(
+                    {"telegram_id": user_id},
+                    {"$inc": {"balance": amount}}
+                )
+                
+                if result.modified_count > 0:
+                    # Save payment record
+                    payment = Payment(
+                        user_id=user_id,
+                        amount=amount,
+                        payment_type="crypto",
+                        payment_id=invoice_id,
+                        status="completed"
+                    )
+                    await db.payments.insert_one(payment.dict())
+                    
+                    # Send notification to user
+                    notification_text = f"🎉 *ПОПОЛНЕНИЕ УСПЕШНО!*\n\n"
+                    notification_text += f"🤖 *Способ:* Криптовалюта\n"
+                    notification_text += f"💰 *Сумма:* {amount}₽\n"
+                    notification_text += f"📋 *ID платежа:* {invoice_id}\n\n"
+                    notification_text += f"✅ *Средства зачислены на баланс*\n"
+                    notification_text += f"🔍 *Теперь вы можете пользоваться сервисом!*"
+                    
+                    await send_telegram_message(
+                        user_id,
+                        notification_text,
+                        reply_markup=create_main_menu()
+                    )
+                    
+                    logging.info(f"Crypto payment processed: {amount}₽ for user {user_id}")
+                else:
+                    logging.error(f"Failed to update balance for user {user_id}")
+            else:
+                logging.warning(f"CryptoBot payment not paid: status={status}")
+                
+    except Exception as e:
+        logging.error(f"Error processing CryptoBot payment: {e}")
+
 async def handle_callback_query(callback_query: Dict[str, Any]):
     """Handle callback queries from inline keyboard buttons"""
     chat_id = callback_query.get('message', {}).get('chat', {}).get('id')
@@ -1048,16 +1126,43 @@ async def handle_crypto_payment_amount(chat_id: int, user: User, crypto_type: st
             )
             return
             
-        # Here you would integrate with your crypto payment processor
-        # For now, we'll just show a mock wallet address
-        wallet_text = f"💰 *ПОПОЛНЕНИЕ ЧЕРЕЗ {crypto_names.get(crypto_type, crypto_type.upper())}*\n\n"
-        wallet_text += f"💎 Сумма: {amount_float} ₽\n\n"
-        wallet_text += f"📋 *Адрес для перевода:*\n`bc1q...`\n\n"  # Replace with actual wallet
-        wallet_text += f"⚡ *Статус:* Ожидание оплаты\n"
-        wallet_text += f"⏱️ *Зачисление:* 1-30 минут\n\n"
-        wallet_text += f"📞 *Поддержка:* @Sigicara"
+        # Create CryptoBot invoice
+        invoice_result = await create_cryptobot_invoice(amount_float, user.telegram_id, currency="RUB")
         
-        await send_telegram_message(chat_id, wallet_text, reply_markup=create_back_keyboard())
+        if invoice_result.get('ok'):
+            invoice_data = invoice_result.get('result', {})
+            invoice_url = invoice_data.get('bot_invoice_url')
+            invoice_id = invoice_data.get('invoice_id')
+            
+            if invoice_url:
+                wallet_text = f"💰 *ПОПОЛНЕНИЕ ЧЕРЕЗ {crypto_names.get(crypto_type, crypto_type.upper())}*\n\n"
+                wallet_text += f"💎 Сумма: {amount_float} ₽\n"
+                wallet_text += f"📋 ID платежа: {invoice_id}\n\n"
+                wallet_text += f"⚡ *Зачисление:* 1-30 минут после оплаты\n"
+                wallet_text += f"📞 *Поддержка:* @Sigicara\n\n"
+                wallet_text += f"👆 *Нажмите кнопку ниже для оплаты*"
+                
+                keyboard = {
+                    "inline_keyboard": [
+                        [{"text": "💳 Оплатить", "url": invoice_url}],
+                        [{"text": "◀️ Назад", "callback_data": "menu_balance"}]
+                    ]
+                }
+                
+                await send_telegram_message(chat_id, wallet_text, reply_markup=keyboard)
+            else:
+                await send_telegram_message(
+                    chat_id,
+                    "❌ Ошибка создания платежа. Попробуйте позже.",
+                    reply_markup=create_back_keyboard()
+                )
+        else:
+            error_msg = invoice_result.get('error', {}).get('message', 'Неизвестная ошибка')
+            await send_telegram_message(
+                chat_id,
+                f"❌ Ошибка создания платежа: {error_msg}",
+                reply_markup=create_back_keyboard()
+            )
         
     except ValueError:
         await send_telegram_message(
@@ -1593,7 +1698,7 @@ def validate_custom_amount(amount_str: str) -> tuple[bool, str, float]:
     except ValueError:
         return False, "Введите корректную сумму (только цифры)", 0
 
-async def create_cryptobot_invoice(amount: float, currency: str = "RUB") -> Dict[str, Any]:
+async def create_cryptobot_invoice(amount: float, user_id: int, currency: str = "RUB") -> Dict[str, Any]:
     """Create CryptoBot invoice"""
     try:
         url = f"{CRYPTOBOT_BASE_URL}/createInvoice"
@@ -1606,9 +1711,10 @@ async def create_cryptobot_invoice(amount: float, currency: str = "RUB") -> Dict
             "currency_type": "fiat",
             "fiat": currency,
             "amount": str(amount),
-            "description": f"Пополнение баланса УЗРИ на {amount}₽",
+            "description": f"Пополнение баланса УЗРИ для пользователя {user_id} на {amount}₽",
             "paid_btn_name": "callback",
-            "paid_btn_url": "https://t.me/search1_test_bot"
+            "paid_btn_url": "https://t.me/search1_test_bot",
+            "payload": f"crypto_payment_{user_id}_{amount}"
         }
         
         response = requests.post(url, headers=headers, json=payload, timeout=30)
